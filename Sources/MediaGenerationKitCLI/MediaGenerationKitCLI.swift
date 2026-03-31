@@ -451,12 +451,12 @@ struct MediaGenerationKitCLIRunner {
   var prompt: String = Self.defaultPromptValue
   var promptFile: String? = nil
   var negativePrompt: String = ""
-  var model: String = "sd_v1.5_f16.ckpt"
-  var steps: Int = 20
+  var model: String = "flux_2_klein_4b_q8p.ckpt"
+  var steps: Int = 4
   var seed: UInt32 = 0
-  var width: Int = 512
-  var height: Int = 512
-  var guidanceScale: Float = 7.5
+  var width: Int = 1024
+  var height: Int = 1024
+  var guidanceScale: Float = 4
   var output: String = "output.png"
   var moodboard: [String] = []
   var json: Bool = false
@@ -469,7 +469,7 @@ struct MediaGenerationKitCLIRunner {
 
   var useRemote: Bool = false
   var remoteUrl: String? = nil
-  var remotePort: Int = 7860
+  var remotePort: Int = 7859
   var remoteTls: Bool = false
   var listRemoteModels: Bool = false
   var ensureModel: String? = nil
@@ -1006,9 +1006,8 @@ struct MediaGenerationKitCLIRunner {
         "--remote-url is required.")
     }
     let trimmed = remoteUrl.trimmingCharacters(in: .whitespacesAndNewlines)
-    let components =
-      URLComponents(string: trimmed)
-      ?? URLComponents(string: "http://\(trimmed)")
+    let candidate = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
+    let components = URLComponents(string: candidate)
     guard let components, let host = components.host, !host.isEmpty else {
       throw MediaGenerationKitCLIExecutionError.invalidArgument(
         "Failed to parse --remote-url '\(remoteUrl)'.")
@@ -1302,11 +1301,11 @@ struct MediaGenerationKitCLIRunner {
     }
 
     if listRemoteModels && !useRemote {
-      throw MediaGenerationKitCLIExecutionError.invalidArgument("--list-remote-models requires --use-remote.")
+      throw MediaGenerationKitCLIExecutionError.invalidArgument("--list-remote-models requires --remote.")
     }
     if storageInfo && useRemote {
       throw MediaGenerationKitCLIExecutionError.invalidArgument(
-        "--storage-info is local-only and cannot be combined with --use-remote.")
+        "--storage-info is local-only and cannot be combined with --remote.")
     }
     if ensureModel != nil && useRemote {
       throw MediaGenerationKitCLIExecutionError.invalidArgument(
@@ -1314,11 +1313,11 @@ struct MediaGenerationKitCLIRunner {
     }
     if convertLora != nil && useRemote {
       throw MediaGenerationKitCLIExecutionError.invalidArgument(
-        "--convert-lora is local-only and cannot be combined with --use-remote.")
+        "--convert-lora is local-only and cannot be combined with --remote.")
     }
     if uploadLora != nil && useRemote {
       throw MediaGenerationKitCLIExecutionError.invalidArgument(
-        "--upload-lora is upload-only and cannot be combined with --use-remote.")
+        "--upload-lora is upload-only and cannot be combined with --remote.")
     }
     if uploadLora != nil && effectiveAPIKey == nil {
       throw MediaGenerationKitCLIExecutionError.invalidArgument(
@@ -1326,7 +1325,7 @@ struct MediaGenerationKitCLIRunner {
     }
     if listDownloadableModels && useRemote {
       throw MediaGenerationKitCLIExecutionError.invalidArgument(
-        "--list-downloadable-models is local-only and cannot be combined with --use-remote.")
+        "--list-downloadable-models is local-only and cannot be combined with --remote.")
     }
     if inputStrength != nil && inputImagePath == nil {
       throw MediaGenerationKitCLIExecutionError.invalidArgument(
@@ -1480,7 +1479,11 @@ struct MediaGenerationKitCLIRunner {
         let remote = try resolvedRemoteEndpoint()
         backend = .remote(remote.endpoint, options: .init(useTLS: remote.useTLS))
       } else {
-        backend = .local(modelsDirectory)
+        if let modelsDirectory {
+          backend = .local(directory: modelsDirectory)
+        } else {
+          backend = .local
+        }
       }
       let resolvedModel = try resolveGenerationModelOrThrow(inspectModel, backend: backend, flag: "--model")
       let info = inspectInfo(for: resolvedModel)
@@ -1536,7 +1539,11 @@ struct MediaGenerationKitCLIRunner {
       let remote = try resolvedRemoteEndpoint()
       generationBackend = .remote(remote.endpoint, options: .init(useTLS: remote.useTLS))
     } else {
-      generationBackend = .local(modelsDirectory)
+      if let modelsDirectory {
+        generationBackend = .local(directory: modelsDirectory)
+      } else {
+        generationBackend = .local
+      }
     }
     let resolvedModel = try resolveGenerationModelOrThrow(model, backend: generationBackend)
     if resolvedModel != model {
@@ -1988,10 +1995,10 @@ struct MediaGenerationKitCLI: ParsableCommand {
     var negativePrompt: String = ""
 
     @Option(name: .shortAndLong, help: "The model file name to use.")
-    var model: String = "sd_v1.5_f16.ckpt"
+    var model: String = "flux_2_klein_4b_q8p.ckpt"
 
     @Option(name: .customLong("num-inference-steps"), help: "Number of inference steps.")
-    var steps: Int = 20
+    var steps: Int = 4
 
     @Option(
       name: [.customShort("S"), .long],
@@ -2000,13 +2007,13 @@ struct MediaGenerationKitCLI: ParsableCommand {
     var seed: UInt32 = 0
 
     @Option(name: .shortAndLong, help: "Image width in pixels (must be multiple of 64).")
-    var width: Int = 512
+    var width: Int = 1024
 
     @Option(name: .shortAndLong, help: "Image height in pixels (must be multiple of 64).")
-    var height: Int = 512
+    var height: Int = 1024
 
     @Option(name: .shortAndLong, help: "Guidance scale for classifier-free guidance.")
-    var guidanceScale: Float = 7.5
+    var guidanceScale: Float = 4
 
     @Option(name: .shortAndLong, help: "Output file path for the generated image.")
     var output: String = "output.png"
@@ -2092,8 +2099,8 @@ struct MediaGenerationKitCLI: ParsableCommand {
     @Option(name: .customLong("remote-url"), help: "Remote server URL.")
     var remoteUrl: String?
 
-    @Option(name: .customLong("remote-port"), help: "Remote server port (default: 7860).")
-    var remotePort: Int = 7860
+    @Option(name: .customLong("remote-port"), help: "Remote server port (default: 7859).")
+    var remotePort: Int = 7859
 
     @Flag(name: .customLong("remote-tls"), help: "Use TLS for remote connection.")
     var remoteTls: Bool = false
@@ -2110,7 +2117,7 @@ struct MediaGenerationKitCLI: ParsableCommand {
         runner.logModelsDirectory = false
         return
       }
-      if remoteUrl != nil || remotePort != 7860 || remoteTls {
+      if remoteUrl != nil || remotePort != 7859 || remoteTls {
         throw ValidationError("Remote endpoint flags require --remote.")
       }
     }
@@ -2120,8 +2127,8 @@ struct MediaGenerationKitCLI: ParsableCommand {
     @Option(name: .customLong("remote-url"), help: "Remote server URL.")
     var remoteUrl: String
 
-    @Option(name: .customLong("remote-port"), help: "Remote server port (default: 7860).")
-    var remotePort: Int = 7860
+    @Option(name: .customLong("remote-port"), help: "Remote server port (default: 7859).")
+    var remotePort: Int = 7859
 
     @Flag(name: .customLong("remote-tls"), help: "Use TLS for remote connection.")
     var remoteTls: Bool = false

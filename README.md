@@ -77,10 +77,7 @@ struct RemoteExampleApp {
   static func main() async throws {
     var pipeline = try MediaGenerationPipeline.fromPretrained(
       "hf://black-forest-labs/FLUX.2-klein-4B",
-      backend: .remote(
-        .init(host: "127.0.0.1", port: 7860),
-        options: .init(useTLS: false)
-      )
+      backend: .remote(.init(host: "127.0.0.1", port: 7859))
     )
 
     pipeline.configuration.width = 1024
