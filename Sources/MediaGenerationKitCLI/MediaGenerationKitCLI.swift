@@ -468,6 +468,7 @@ struct MediaGenerationKitCLIRunner {
   var weightsCache: Int = 8
 
   var useRemote: Bool = false
+  var useCloudCompute: Bool = false
   var remoteUrl: String? = nil
   var remotePort: Int = 7859
   var remoteTls: Bool = false
@@ -597,7 +598,7 @@ struct MediaGenerationKitCLIRunner {
     let batchCount: Int
     let batchSize: Int
     let strength: Float
-    let useRemote: Bool
+    let backend: String
     let output: String
     let inputImage: String?
     let moodboard: [String]
@@ -955,8 +956,11 @@ struct MediaGenerationKitCLIRunner {
     }
   }
 
-  private func inspectInfo(for resolvedModel: String) -> CLIModelInspectInfo {
-    guard let inspection = try? MediaGenerationEnvironment.default.inspectModel(resolvedModel) else {
+  private func inspectInfo(for resolvedModel: String) async -> CLIModelInspectInfo {
+    guard let inspection = try? await MediaGenerationEnvironment.default.inspectModel(
+      resolvedModel,
+      offline: false
+    ) else {
       return CLIModelInspectInfo(
         name: nil,
         version: nil,
@@ -1080,13 +1084,16 @@ struct MediaGenerationKitCLIRunner {
     return directoryURL.appendingPathComponent("\(stem)_lora_f16.ckpt")
   }
 
-  private func resolveModelReferenceOrThrow(_ input: String, flag: String = "--model") throws
+  private func resolveModelReferenceOrThrow(_ input: String, flag: String = "--model") async throws
     -> String
   {
-    if let resolved = MediaGenerationEnvironment.default.resolveModel(input)?.file {
+    if let resolved = await MediaGenerationEnvironment.default.resolveModel(input, offline: false)?.file {
       return resolved
     }
-    let suggestions = MediaGenerationEnvironment.default.suggestedModels(for: input)
+    let suggestions = await MediaGenerationEnvironment.default.suggestedModels(
+      for: input,
+      offline: false
+    )
     guard !suggestions.isEmpty else {
       throw MediaGenerationKitCLIExecutionError.modelNotFound("Could not resolve \(flag) '\(input)'.")
     }
@@ -1099,20 +1106,23 @@ struct MediaGenerationKitCLIRunner {
     _ input: String,
     backend: MediaGenerationPipeline.Backend,
     flag: String = "--model"
-  ) throws -> String {
+  ) async throws -> String {
     switch backend {
     case .local:
-      return try resolveModelReferenceOrThrow(input, flag: flag)
+      return try await resolveModelReferenceOrThrow(input, flag: flag)
     case .remote, .cloudCompute:
-      return MediaGenerationEnvironment.default.resolveModel(input)?.file ?? input
+      return await MediaGenerationEnvironment.default.resolveModel(input, offline: false)?.file ?? input
     }
   }
 
   private func resolveModelReferenceError(
     _ input: String,
     flag: String
-  ) throws -> MediaGenerationKitCLIExecutionError {
-    let localSuggestions = MediaGenerationEnvironment.default.suggestedModels(for: input).map {
+  ) async throws -> MediaGenerationKitCLIExecutionError {
+    let localSuggestions = await MediaGenerationEnvironment.default.suggestedModels(
+      for: input,
+      offline: false
+    ).map {
       "\($0.file) (\($0.name))"
     }
     let combinedSuggestions = Array(localSuggestions.prefix(5))
@@ -1128,7 +1138,7 @@ struct MediaGenerationKitCLIRunner {
     prompt: String,
     negativePrompt: String,
     configuration: MediaGenerationPipeline.Configuration,
-    useRemote: Bool,
+    backend: String,
     inputImage: String?,
     moodboard: [String]
   ) -> JSONResolvedConfiguration {
@@ -1145,7 +1155,7 @@ struct MediaGenerationKitCLIRunner {
       batchCount: configuration.batchCount,
       batchSize: configuration.batchSize,
       strength: configuration.strength,
-      useRemote: useRemote,
+      backend: backend,
       output: output,
       inputImage: inputImage,
       moodboard: moodboard
@@ -1214,6 +1224,9 @@ struct MediaGenerationKitCLIRunner {
       case .insufficientStorage:
         return CLIErrorDescriptor(
           code: .modelFilesMissing, message: "Insufficient storage space.", exitCode: 4)
+      case .asyncOperationRequired:
+        return CLIErrorDescriptor(
+          code: .invalidArgument, message: sdkError.localizedDescription, exitCode: 2)
       }
     }
 
@@ -1226,9 +1239,9 @@ struct MediaGenerationKitCLIRunner {
       code: .internalError, message: error.localizedDescription, exitCode: 1)
   }
 
-  func run() throws {
+  func run() async throws {
     do {
-      try runImpl()
+      try await runImpl()
     } catch {
       let mapped = describeError(error)
       let errorPayload = JSONErrorInfo(code: mapped.code.rawValue, message: mapped.message)
@@ -1258,7 +1271,7 @@ struct MediaGenerationKitCLIRunner {
     }
   }
 
-  private func runImpl() throws {
+  private func runImpl() async throws {
     let storedCredentials = MediaGenerationKitCLICredentialsStore.load()
     let baseURL = try resolvedCloudAPIBaseURL(using: storedCredentials)
     let effectiveAPIKey = apiKey ?? storedCredentials?.apiKey
@@ -1300,6 +1313,11 @@ struct MediaGenerationKitCLIRunner {
       return
     }
 
+    if useRemote && useCloudCompute {
+      throw MediaGenerationKitCLIExecutionError.invalidArgument(
+        "--remote and --cloud-compute cannot be combined.")
+    }
+
     if listRemoteModels && !useRemote {
       throw MediaGenerationKitCLIExecutionError.invalidArgument("--list-remote-models requires --remote.")
     }
@@ -1330,6 +1348,10 @@ struct MediaGenerationKitCLIRunner {
     if inputStrength != nil && inputImagePath == nil {
       throw MediaGenerationKitCLIExecutionError.invalidArgument(
         "--strength requires --image.")
+    }
+    if useCloudCompute && effectiveAPIKey == nil {
+      throw MediaGenerationKitCLIExecutionError.invalidArgument(
+        "--cloud-compute requires --api-key unless you already signed in with `auth login`.")
     }
 
     let hasUtilityAction =
@@ -1459,8 +1481,9 @@ struct MediaGenerationKitCLIRunner {
 
     if listDownloadableModels {
       _ = try prepareDefaultEnvironmentForLocalModels()
-      let models = MediaGenerationEnvironment.default.downloadableModels(
-        includeDownloaded: includeDownloadedModels
+      let models = await MediaGenerationEnvironment.default.downloadableModels(
+        includeDownloaded: includeDownloadedModels,
+        offline: false
       )
       textLog("  Downloadable models: \(models.count)")
       for model in models {
@@ -1485,10 +1508,17 @@ struct MediaGenerationKitCLIRunner {
           backend = .local
         }
       }
-      let resolvedModel = try resolveGenerationModelOrThrow(inspectModel, backend: backend, flag: "--model")
-      let info = inspectInfo(for: resolvedModel)
+      let resolvedModel = try await resolveGenerationModelOrThrow(
+        inspectModel,
+        backend: backend,
+        flag: "--model"
+      )
+      let info = await inspectInfo(for: resolvedModel)
       let isModelDownloaded =
-        (try? MediaGenerationEnvironment.default.inspectModel(resolvedModel).isDownloaded) ?? false
+        (try? await MediaGenerationEnvironment.default.inspectModel(
+          resolvedModel,
+          offline: false
+        ).isDownloaded) ?? false
       if json {
         emitJSON(
           JSONModelInspectOutput(
@@ -1535,29 +1565,47 @@ struct MediaGenerationKitCLIRunner {
     }
 
     let generationBackend: MediaGenerationPipeline.Backend
-    if useRemote {
+    let backendDescription: String
+    if useCloudCompute {
+      generationBackend = .cloudCompute(
+        apiKey: effectiveAPIKey,
+        options: .init(baseURL: baseURL)
+      )
+      backendDescription = "cloud-compute"
+      if apiKey == nil, let storedCredentials {
+        textLog("Using saved cloud credentials (\(storedCredentials.provider)) from:")
+        textLog("  \(MediaGenerationKitCLICredentialsStore.description())")
+      }
+    } else if useRemote {
       let remote = try resolvedRemoteEndpoint()
       generationBackend = .remote(remote.endpoint, options: .init(useTLS: remote.useTLS))
+      backendDescription = "remote"
     } else {
       if let modelsDirectory {
         generationBackend = .local(directory: modelsDirectory)
       } else {
         generationBackend = .local
       }
+      backendDescription = "local"
     }
-    let resolvedModel = try resolveGenerationModelOrThrow(model, backend: generationBackend)
+    let resolvedModel = try await resolveGenerationModelOrThrow(model, backend: generationBackend)
     if resolvedModel != model {
       textLog("Resolved model: \(model) -> \(resolvedModel)")
     }
-    if logModelsDirectory, !useRemote, let modelsDirectoryURL = try? defaultModelsDirectoryURL() {
+    if logModelsDirectory, !useRemote, !useCloudCompute,
+      let modelsDirectoryURL = try? defaultModelsDirectoryURL()
+    {
       textLog("Models directory: \(modelsDirectoryURL.path)")
     }
     if verbose {
       textLog("Weights cache: \(weightsCache) GiB")
-      textLog("Backend: \(useRemote ? "remote" : "local")")
+      textLog("Backend: \(backendDescription)")
     }
 
-    var pipeline = try MediaGenerationPipeline.fromPretrained(resolvedModel, backend: generationBackend)
+    var pipeline = try await MediaGenerationPipeline.fromPretrained(
+      resolvedModel,
+      backend: generationBackend
+    )
     pipeline.configuration.width = width
     pipeline.configuration.height = height
     pipeline.configuration.seed = seed
@@ -1583,7 +1631,7 @@ struct MediaGenerationKitCLIRunner {
       prompt: effectivePrompt,
       negativePrompt: finalNegativePrompt,
       configuration: generationPipeline.configuration,
-      useRemote: useRemote,
+      backend: backendDescription,
       inputImage: inputImagePath,
       moodboard: moodboard
     )
@@ -1952,7 +2000,7 @@ struct MediaGenerationKitCLIRunner {
 }
 
 @main
-struct MediaGenerationKitCLI: ParsableCommand {
+struct MediaGenerationKitCLI: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "media-generation-kit-cli",
     abstract: "MediaGenerationKit CLI",
@@ -2123,6 +2171,30 @@ struct MediaGenerationKitCLI: ParsableCommand {
     }
   }
 
+  struct CloudComputeOptions: ParsableArguments {
+    @Flag(name: .customLong("cloud-compute"), help: "Generate on Draw Things cloud compute.")
+    var cloudCompute: Bool = false
+
+    @Option(help: "DrawThings API key for cloud compute. Uses saved credentials if omitted.")
+    var apiKey: String?
+
+    @Option(name: .customLong("cloud-api-base-url"), help: "Cloud API base URL (default: https://api.drawthings.ai).")
+    var cloudAPIBaseURL: String?
+
+    fileprivate func apply(to runner: inout MediaGenerationKitCLIRunner) throws {
+      if cloudCompute {
+        runner.useCloudCompute = true
+        runner.apiKey = apiKey
+        runner.cloudAPIBaseURL = cloudAPIBaseURL
+        runner.logModelsDirectory = false
+        return
+      }
+      if apiKey != nil || cloudAPIBaseURL != nil {
+        throw ValidationError("Cloud compute flags require --cloud-compute.")
+      }
+    }
+  }
+
   struct RemoteServerOptions: ParsableArguments {
     @Option(name: .customLong("remote-url"), help: "Remote server URL.")
     var remoteUrl: String
@@ -2147,7 +2219,7 @@ struct MediaGenerationKitCLI: ParsableCommand {
     }
   }
 
-  struct Generate: ParsableCommand {
+  struct Generate: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
       commandName: "generate",
       abstract: "Generate images."
@@ -2157,25 +2229,27 @@ struct MediaGenerationKitCLI: ParsableCommand {
     @OptionGroup var options: SharedGenerationOptions
     @OptionGroup var imageInput: ImageInputOptions
     @OptionGroup var remoteOptions: RemoteEndpointOptions
+    @OptionGroup var cloudOptions: CloudComputeOptions
 
-    func run() throws {
+    func run() async throws {
       var runner = MediaGenerationKitCLI.makeRunner(modelsDirectory: modelsDirectoryOptions.modelsDir)
       options.apply(to: &runner)
       runner.inputStrength = imageInput.strength
       runner.inputImagePath = try imageInput.resolvedPath(using: runner)
       try remoteOptions.apply(to: &runner)
-      try runner.run()
+      try cloudOptions.apply(to: &runner)
+      try await runner.run()
     }
   }
 
-  struct Auth: ParsableCommand {
+  struct Auth: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
       commandName: "auth",
       abstract: "Authentication helpers.",
       subcommands: [State.self, Token.self, Login.self, Logout.self]
     )
 
-    struct State: ParsableCommand {
+    struct State: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "state",
         abstract: "Validate auth-state progression."
@@ -2183,16 +2257,16 @@ struct MediaGenerationKitCLI: ParsableCommand {
 
       @OptionGroup var auth: CloudAuthOptions
 
-      func run() throws {
+      func run() async throws {
         var runner = MediaGenerationKitCLI.makeRunner()
         auth.apply(to: &runner)
         runner.printAuthState = true
         runner.testAuthState = true
-        try runner.run()
+        try await runner.run()
       }
     }
 
-    struct Token: ParsableCommand {
+    struct Token: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "token",
         abstract: "Fetch short-term token and exit."
@@ -2200,15 +2274,15 @@ struct MediaGenerationKitCLI: ParsableCommand {
 
       @OptionGroup var auth: CloudAuthOptions
 
-      func run() throws {
+      func run() async throws {
         var runner = MediaGenerationKitCLI.makeRunner()
         auth.apply(to: &runner)
         runner.testAuth = true
-        try runner.run()
+        try await runner.run()
       }
     }
 
-    struct Login: ParsableCommand {
+    struct Login: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "login",
         abstract: "Sign in with Google in your browser and save the returned Draw Things API key."
@@ -2220,7 +2294,7 @@ struct MediaGenerationKitCLI: ParsableCommand {
       @Flag(name: .long, help: "Emit login result as JSON.")
       var json: Bool = false
 
-      func run() throws {
+      func run() async throws {
         let baseURL: URL
         if let cloudAPIBaseURL {
           guard let parsedURL = URL(string: cloudAPIBaseURL) else {
@@ -2257,7 +2331,7 @@ struct MediaGenerationKitCLI: ParsableCommand {
       }
     }
 
-    struct Logout: ParsableCommand {
+    struct Logout: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "logout",
         abstract: "Remove saved cloud credentials."
@@ -2266,7 +2340,7 @@ struct MediaGenerationKitCLI: ParsableCommand {
       @Flag(name: .long, help: "Emit logout result as JSON.")
       var json: Bool = false
 
-      func run() throws {
+      func run() async throws {
         try MediaGenerationKitCLICredentialsStore.remove()
         let output = AuthCommandOutput(
           ok: true,
@@ -2286,17 +2360,17 @@ struct MediaGenerationKitCLI: ParsableCommand {
     }
   }
 
-  struct Models: ParsableCommand {
+  struct Models: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
       commandName: "models",
       abstract: "Model catalog operations.",
       subcommands: [List.self, Ensure.self, ListRemote.self, Inspect.self]
     )
 
-    struct List: ParsableCommand {
+    struct List: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "list",
-        abstract: "List local downloadable models from catalog."
+        abstract: "List downloadable models from catalog."
       )
 
       @OptionGroup var modelsDirectoryOptions: ModelsDirectoryOptions
@@ -2304,15 +2378,15 @@ struct MediaGenerationKitCLI: ParsableCommand {
       @Flag(help: "Include already-downloaded models.")
       var includeDownloaded: Bool = false
 
-      func run() throws {
+      func run() async throws {
         var runner = MediaGenerationKitCLI.makeRunner(modelsDirectory: modelsDirectoryOptions.modelsDir)
         runner.listDownloadableModels = true
         runner.includeDownloadedModels = includeDownloaded
-        try runner.run()
+        try await runner.run()
       }
     }
 
-    struct Ensure: ParsableCommand {
+    struct Ensure: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "ensure",
         abstract: "Ensure model files exist locally (download if missing)."
@@ -2323,14 +2397,14 @@ struct MediaGenerationKitCLI: ParsableCommand {
       @Option(name: .long, help: "Model file or reference.")
       var model: String
 
-      func run() throws {
+      func run() async throws {
         var runner = MediaGenerationKitCLI.makeRunner(modelsDirectory: modelsDirectoryOptions.modelsDir)
         runner.ensureModel = model
-        try runner.run()
+        try await runner.run()
       }
     }
 
-    struct ListRemote: ParsableCommand {
+    struct ListRemote: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "list-remote",
         abstract: "List remote server models/files."
@@ -2338,7 +2412,7 @@ struct MediaGenerationKitCLI: ParsableCommand {
 
       @OptionGroup var remoteOptions: RemoteServerOptions
 
-      func run() throws {
+      func run() async throws {
         var runner = MediaGenerationKitCLI.makeRunner()
         runner.useRemote = true
         runner.remoteUrl = remoteOptions.remoteUrl
@@ -2346,14 +2420,14 @@ struct MediaGenerationKitCLI: ParsableCommand {
         runner.remoteTls = remoteOptions.remoteTls
         runner.logModelsDirectory = false
         runner.listRemoteModels = true
-        try runner.run()
+        try await runner.run()
       }
     }
 
-    struct Inspect: ParsableCommand {
+    struct Inspect: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "inspect",
-        abstract: "Inspect resolved model metadata and info."
+        abstract: "Inspect resolved model metadata, using the online catalog when needed."
       )
 
       @OptionGroup var modelsDirectoryOptions: ModelsDirectoryOptions
@@ -2364,23 +2438,23 @@ struct MediaGenerationKitCLI: ParsableCommand {
       @Flag(name: .long, help: "Emit inspect result as JSON.")
       var json: Bool = false
 
-      func run() throws {
+      func run() async throws {
         var runner = MediaGenerationKitCLI.makeRunner(modelsDirectory: modelsDirectoryOptions.modelsDir)
         runner.inspectModel = model
         runner.json = json
-        try runner.run()
+        try await runner.run()
       }
     }
   }
 
-  struct Lora: ParsableCommand {
+  struct Lora: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
       commandName: "lora",
       abstract: "LoRA conversion and upload operations.",
       subcommands: [Convert.self, Upload.self]
     )
 
-    struct Convert: ParsableCommand {
+    struct Convert: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "convert",
         abstract: "Convert safetensors LoRA to DrawThings ckpt."
@@ -2398,17 +2472,17 @@ struct MediaGenerationKitCLI: ParsableCommand {
       @Option(name: .long, help: "Scale factor.")
       var scale: Double = 1.0
 
-      func run() throws {
+      func run() async throws {
         var runner = MediaGenerationKitCLI.makeRunner()
         runner.convertLora = input
         runner.loraOutput = output
         runner.loraOutputDirectory = outputDir
         runner.loraScale = scale
-        try runner.run()
+        try await runner.run()
       }
     }
 
-    struct Upload: ParsableCommand {
+    struct Upload: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "upload",
         abstract: "Upload converted LoRA to DrawThings cloud."
@@ -2419,16 +2493,16 @@ struct MediaGenerationKitCLI: ParsableCommand {
 
       @OptionGroup var auth: CloudAuthOptions
 
-      func run() throws {
+      func run() async throws {
         var runner = MediaGenerationKitCLI.makeRunner()
         runner.uploadLora = input
         auth.apply(to: &runner)
-        try runner.run()
+        try await runner.run()
       }
     }
   }
 
-  struct Storage: ParsableCommand {
+  struct Storage: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
       commandName: "storage",
       abstract: "Storage info commands.",
@@ -2436,7 +2510,7 @@ struct MediaGenerationKitCLI: ParsableCommand {
       defaultSubcommand: Info.self
     )
 
-    struct Info: ParsableCommand {
+    struct Info: AsyncParsableCommand {
       static let configuration = CommandConfiguration(
         commandName: "info",
         abstract: "Print storage usage."
@@ -2444,10 +2518,10 @@ struct MediaGenerationKitCLI: ParsableCommand {
 
       @OptionGroup var modelsDirectoryOptions: ModelsDirectoryOptions
 
-      func run() throws {
+      func run() async throws {
         var runner = MediaGenerationKitCLI.makeRunner(modelsDirectory: modelsDirectoryOptions.modelsDir)
         runner.storageInfo = true
-        try runner.run()
+        try await runner.run()
       }
     }
   }

@@ -42,7 +42,7 @@ struct ExampleApp {
       "hf://black-forest-labs/FLUX.2-klein-4B"
     )
 
-    var pipeline = try MediaGenerationPipeline.fromPretrained(
+    var pipeline = try await MediaGenerationPipeline.fromPretrained(
       "hf://black-forest-labs/FLUX.2-klein-4B",
       backend: .local
     )
@@ -75,7 +75,7 @@ import MediaGenerationKit
 @main
 struct RemoteExampleApp {
   static func main() async throws {
-    var pipeline = try MediaGenerationPipeline.fromPretrained(
+    var pipeline = try await MediaGenerationPipeline.fromPretrained(
       "hf://black-forest-labs/FLUX.2-klein-4B",
       backend: .remote(.init(host: "127.0.0.1", port: 7859))
     )
@@ -107,7 +107,7 @@ import MediaGenerationKit
 @main
 struct CloudComputeExampleApp {
   static func main() async throws {
-    var pipeline = try MediaGenerationPipeline.fromPretrained(
+    var pipeline = try await MediaGenerationPipeline.fromPretrained(
       "hf://black-forest-labs/FLUX.2-klein-4B",
       backend: .cloudCompute(apiKey: "YOUR_API_KEY")
     )
@@ -141,11 +141,27 @@ struct CloudComputeExampleApp {
 - `inspectModel(...)`
 - `downloadableModels(...)`
 
-Example:
+These model/catalog helpers have both sync and async overloads:
+
+- Sync overloads are for offline-only or already-cached catalog access.
+- Async overloads are the network-capable path and default to `offline: false`.
+- If a sync overload is called with `offline: false` and it would need to fetch remote catalog data, it throws `MediaGenerationKitError.asyncOperationRequired(...)`.
+
+Examples:
 
 ```swift
 MediaGenerationEnvironment.default.maxTotalWeightsCacheSize =
   8 * 1_024 * 1_024 * 1_024
+
+let localOnly = try MediaGenerationEnvironment.default.resolveModel(
+  "flux_2_klein_4b_q8p.ckpt",
+  offline: true
+)
+
+let remoteCapable = await MediaGenerationEnvironment.default.resolveModel(
+  "hf://black-forest-labs/FLUX.2-klein-4B",
+  offline: false
+)
 ```
 
 ## CLI
@@ -155,6 +171,8 @@ This repository also includes the example CLI product:
 ```bash
 swift run media-generation-kit-cli --help
 ```
+
+The CLI uses the async catalog APIs, so model resolution, `models list`, and `models inspect` can populate from bundled or remote catalog data when needed.
 
 Common commands:
 
@@ -174,7 +192,7 @@ swift run media-generation-kit-cli lora convert \
   --input ./style.safetensors \
   --output ./style_lora_f16.ckpt
 
-swift run media-generation-kit-cli auth login --provider google
+swift run media-generation-kit-cli auth login
 ```
 
 For remote generation:
@@ -183,11 +201,26 @@ For remote generation:
 swift run media-generation-kit-cli generate \
   --remote \
   --remote-url 127.0.0.1 \
+  --remote-tls \
   --model hf://black-forest-labs/FLUX.2-klein-4B \
   --width 1024 \
   --height 1024 \
   --num-inference-steps 4 \
   --prompt "a red cube on a table"
+```
+
+For Draw Things cloud compute:
+
+```bash
+swift run media-generation-kit-cli generate \
+  --cloud-compute \
+  --api-key YOUR_API_KEY \
+  --model flux_2_klein_4b_q8p.ckpt \
+  --width 1024 \
+  --height 1024 \
+  --num-inference-steps 4 \
+  --prompt "a red cube on a table" \
+  --output /tmp/cloud-output.png
 ```
 
 ## Source of Truth
