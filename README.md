@@ -44,13 +44,12 @@ struct ExampleApp {
 
     var pipeline = try MediaGenerationPipeline.fromPretrained(
       "hf://black-forest-labs/FLUX.2-klein-4B",
-      backend: .local()
+      backend: .local
     )
 
-    pipeline.configuration.width = 768
-    pipeline.configuration.height = 768
-    pipeline.configuration.steps = 28
-    pipeline.configuration.guidanceScale = 7.5
+    pipeline.configuration.width = 1024
+    pipeline.configuration.height = 1024
+    pipeline.configuration.steps = 4
     pipeline.configuration.seed = 42
 
     let results = try await pipeline.generate(
@@ -60,6 +59,73 @@ struct ExampleApp {
 
     try results[0].write(
       to: URL(fileURLWithPath: "/tmp/output.png"),
+      type: .png
+    )
+  }
+}
+```
+
+## Remote Example
+
+```swift
+import Foundation
+import UniformTypeIdentifiers
+import MediaGenerationKit
+
+@main
+struct RemoteExampleApp {
+  static func main() async throws {
+    var pipeline = try MediaGenerationPipeline.fromPretrained(
+      "hf://black-forest-labs/FLUX.2-klein-4B",
+      backend: .remote(
+        .init(host: "127.0.0.1", port: 7860),
+        options: .init(useTLS: false)
+      )
+    )
+
+    pipeline.configuration.width = 1024
+    pipeline.configuration.height = 1024
+    pipeline.configuration.steps = 4
+
+    let results = try await pipeline.generate(
+      prompt: "a red cube on a table",
+      negativePrompt: ""
+    )
+
+    try results[0].write(
+      to: URL(fileURLWithPath: "/tmp/remote-output.png"),
+      type: .png
+    )
+  }
+}
+```
+
+## Cloud Compute Example
+
+```swift
+import Foundation
+import UniformTypeIdentifiers
+import MediaGenerationKit
+
+@main
+struct CloudComputeExampleApp {
+  static func main() async throws {
+    var pipeline = try MediaGenerationPipeline.fromPretrained(
+      "hf://black-forest-labs/FLUX.2-klein-4B",
+      backend: .cloudCompute(apiKey: "YOUR_API_KEY")
+    )
+
+    pipeline.configuration.width = 1024
+    pipeline.configuration.height = 1024
+    pipeline.configuration.steps = 4
+
+    let results = try await pipeline.generate(
+      prompt: "a red cube on a table",
+      negativePrompt: ""
+    )
+
+    try results[0].write(
+      to: URL(fileURLWithPath: "/tmp/cloud-output.png"),
       type: .png
     )
   }
@@ -98,6 +164,9 @@ Common commands:
 ```bash
 swift run media-generation-kit-cli generate \
   --model hf://black-forest-labs/FLUX.2-klein-4B \
+  --width 1024 \
+  --height 1024 \
+  --num-inference-steps 4 \
   --prompt "a red cube on a table" \
   --output /tmp/output.png
 
@@ -117,8 +186,11 @@ For remote generation:
 swift run media-generation-kit-cli generate \
   --remote \
   --remote-url 127.0.0.1 \
-  --model sd_v1.5_f16.ckpt \
-  --prompt "studio portrait"
+  --model hf://black-forest-labs/FLUX.2-klein-4B \
+  --width 1024 \
+  --height 1024 \
+  --num-inference-steps 4 \
+  --prompt "a red cube on a table"
 ```
 
 ## Source of Truth
