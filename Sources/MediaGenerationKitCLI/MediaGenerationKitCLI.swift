@@ -1,3 +1,4 @@
+#if os(macOS) || os(Linux)
 import ArgumentParser
 import Foundation
 import MediaGenerationKit
@@ -2528,3 +2529,18 @@ struct MediaGenerationKitCLI: AsyncParsableCommand {
     }
   }
 }
+#else
+import ArgumentParser
+
+@main
+struct MediaGenerationKitCLI: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "media-generation-kit-cli",
+    abstract: "MediaGenerationKit CLI is only supported on macOS and Linux."
+  )
+
+  mutating func run() async throws {
+    throw CleanExit.message("media-generation-kit-cli is only supported on macOS and Linux.")
+  }
+}
+#endif

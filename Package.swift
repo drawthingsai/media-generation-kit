@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
   name: "MediaGenerationKit",
-  platforms: [.macOS(.v13), .iOS(.v16)],
+  platforms: [.macOS(.v13), .iOS(.v16), .tvOS(.v16), .visionOS(.v1)],
   products: [
     .library(name: "MediaGenerationKit", targets: ["MediaGenerationKit"]),
     .executable(name: "media-generation-kit-cli", targets: ["MediaGenerationKitCLI"]),
