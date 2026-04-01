@@ -1701,7 +1701,7 @@ struct MediaGenerationKitCLIRunner {
         prompt: effectivePrompt,
         negativePrompt: finalNegativePrompt,
         inputs: generationInputs
-      ) { state in
+      ) { state, _ in
         switch state {
         case .uploading(let uploaded, let total):
           self.textLog("  [Upload] \(uploaded)/\(total) bytes")
