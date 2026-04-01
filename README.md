@@ -1,82 +1,85 @@
-# MediaGenerationKit
+# MediaGenerationKit And CLI
 
-`MediaGenerationKit` is a Swift package for local, remote, and Draw Things cloud media generation.
+This file is the combined quick-start and contract guide for:
 
-This repository is the public SwiftPM entrypoint for the package. The main implementation continues to live in [`drawthingsai/draw-things-community`](https://github.com/drawthingsai/draw-things-community), and this package re-exports the upstream `MediaGenerationKit` module to provide a stable package URL.
+- the `MediaGenerationKit` Swift package
+- the `media-generation-kit-cli` example client
 
-## Requirements
+Keep examples, help text, and behavior aligned with:
 
-- macOS 13+
-- iOS 16+
-- Swift 5.9+
+- `Libraries/MediaGenerationKit`
+- `Apps/MediaGenerationKitCLI/MediaGenerationKitCLI.swift`
 
-## Installation
+If command or API behavior changes, update this file and the wrapper-repo copy that is synced into
+`drawthingsai/media-generation-kit`.
 
-Add the package to your SwiftPM manifest:
+## Swift Package
 
-```swift
-dependencies: [
-  .package(url: "https://github.com/drawthingsai/media-generation-kit.git", branch: "main")
-]
-```
+### Public Surface
 
-Then depend on the library product:
+The package is centered on:
 
-```swift
-.product(name: "MediaGenerationKit", package: "media-generation-kit")
-```
+- `MediaGenerationPipeline`
+- `MediaGenerationEnvironment`
+- `LoRAImporter`
+- `LoRAStore`
+- `MediaGenerationKitError`
+- `AppCheckConfiguration`
 
-Use a tagged version instead of `branch: "main"` once release tags are available.
+Core rules:
 
-## Minimal Example
+- `MediaGenerationPipeline.fromPretrained(...)` is async.
+- Configuration lives on `pipeline.configuration`.
+- `MediaGenerationEnvironment.default` owns process-wide defaults and model-management helpers.
+- `LoRAImporter` is local conversion only.
+- `LoRAStore` is Draw Things cloud storage only.
+
+### Minimal Swift App
 
 ```swift
 import Foundation
-import UniformTypeIdentifiers
 import MediaGenerationKit
 
 @main
 struct ExampleApp {
   static func main() async throws {
     try await MediaGenerationEnvironment.default.ensure(
-      "hf://black-forest-labs/FLUX.2-klein-4B"
+      "flux_2_klein_4b_q8p.ckpt"
     )
 
     var pipeline = try await MediaGenerationPipeline.fromPretrained(
-      "hf://black-forest-labs/FLUX.2-klein-4B",
+      "flux_2_klein_4b_q8p.ckpt",
       backend: .local
     )
 
     pipeline.configuration.width = 1024
     pipeline.configuration.height = 1024
     pipeline.configuration.steps = 4
-    pipeline.configuration.seed = 42
 
     let results = try await pipeline.generate(
-      prompt: "a red cube on a table",
+      prompt: "a cat in studio lighting",
       negativePrompt: ""
     )
 
     try results[0].write(
-      to: URL(fileURLWithPath: "/tmp/output.png"),
+      to: URL(fileURLWithPath: "/tmp/cat.png"),
       type: .png
     )
   }
 }
 ```
 
-## Remote Example
+### Remote Swift App
 
 ```swift
 import Foundation
-import UniformTypeIdentifiers
 import MediaGenerationKit
 
 @main
 struct RemoteExampleApp {
   static func main() async throws {
     var pipeline = try await MediaGenerationPipeline.fromPretrained(
-      "hf://black-forest-labs/FLUX.2-klein-4B",
+      "flux_2_klein_4b_q8p.ckpt",
       backend: .remote(.init(host: "127.0.0.1", port: 7859))
     )
 
@@ -85,30 +88,29 @@ struct RemoteExampleApp {
     pipeline.configuration.steps = 4
 
     let results = try await pipeline.generate(
-      prompt: "a red cube on a table",
+      prompt: "a cat in studio lighting",
       negativePrompt: ""
     )
 
     try results[0].write(
-      to: URL(fileURLWithPath: "/tmp/remote-output.png"),
+      to: URL(fileURLWithPath: "/tmp/cat.png"),
       type: .png
     )
   }
 }
 ```
 
-## Cloud Compute Example
+### Cloud Compute Swift App
 
 ```swift
 import Foundation
-import UniformTypeIdentifiers
 import MediaGenerationKit
 
 @main
 struct CloudComputeExampleApp {
   static func main() async throws {
     var pipeline = try await MediaGenerationPipeline.fromPretrained(
-      "hf://black-forest-labs/FLUX.2-klein-4B",
+      "flux_2_klein_4b_q8p.ckpt",
       backend: .cloudCompute(apiKey: "YOUR_API_KEY")
     )
 
@@ -117,21 +119,49 @@ struct CloudComputeExampleApp {
     pipeline.configuration.steps = 4
 
     let results = try await pipeline.generate(
-      prompt: "a red cube on a table",
+      prompt: "a cat in studio lighting",
       negativePrompt: ""
     )
 
     try results[0].write(
-      to: URL(fileURLWithPath: "/tmp/cloud-output.png"),
+      to: URL(fileURLWithPath: "/tmp/cat.png"),
       type: .png
     )
   }
 }
 ```
 
-## Environment Helpers
+### Backend Shape
 
-`MediaGenerationEnvironment.default` owns process-wide defaults such as:
+- Local:
+  - `backend: .local`
+  - `backend: .local(directory: "/path/to/Models")`
+- Remote:
+  - `backend: .remote(.init(host: "127.0.0.1", port: 7859))`
+- Cloud compute:
+  - `backend: .cloudCompute(apiKey: "YOUR_API_KEY")`
+
+### Inputs And Results
+
+Inputs are direct values:
+
+- `CIImage`
+- `UIImage`
+- `MediaGenerationPipeline.data(_:)`
+- `MediaGenerationPipeline.file(_:)`
+- role wrappers such as `.mask()`, `.moodboard()`, `.depth()`
+
+There is no standalone request/options/assets object.
+
+Results are `MediaGenerationPipeline.Result` values and support:
+
+- `write(to:type:)`
+- `CIImage(result)`
+- `UIImage(result)`
+
+### Environment Helpers
+
+Important members on `MediaGenerationEnvironment.default`:
 
 - `externalUrls`
 - `maxTotalWeightsCacheSize`
@@ -141,95 +171,235 @@ struct CloudComputeExampleApp {
 - `inspectModel(...)`
 - `downloadableModels(...)`
 
-These model/catalog helpers have both sync and async overloads:
+Sync vs async catalog rules:
 
-- Sync overloads are for offline-only or already-cached catalog access.
-- Async overloads are the network-capable path and default to `offline: false`.
-- If a sync overload is called with `offline: false` and it would need to fetch remote catalog data, it throws `MediaGenerationKitError.asyncOperationRequired(...)`.
+- Sync overloads are offline-only or cache-only.
+- Async overloads are the network-capable path.
+- If a sync overload is called with `offline: false` and it would need uncached remote catalog data, it throws `MediaGenerationKitError.asyncOperationRequired(...)`.
+- `suggestedModels(..., offline: false)` is stricter: the sync variant throws immediately if remote catalog data is not already cached.
 
-Examples:
+### LoRA Flows
 
-```swift
-MediaGenerationEnvironment.default.maxTotalWeightsCacheSize =
-  8 * 1_024 * 1_024 * 1_024
+Local conversion:
 
-let localOnly = try MediaGenerationEnvironment.default.resolveModel(
-  "flux_2_klein_4b_q8p.ckpt",
-  offline: true
-)
+- `LoRAImporter(file:version:)`
+- optional `inspect()`
+- `import(to:scaleFactor:progressHandler:)`
 
-let remoteCapable = await MediaGenerationEnvironment.default.resolveModel(
-  "hf://black-forest-labs/FLUX.2-klein-4B",
-  offline: false
-)
-```
+Cloud storage:
+
+- `LoRAStore(backend:)`
+- `upload(_:file:)`
+- `delete(_:)`
+- `delete(keys:)`
 
 ## CLI
 
-This repository also includes the example CLI product:
+### Command Shape
+
+- One `generate` command handles both text-to-image and image-to-image.
+- Remote generation is enabled with `--remote`, not with a separate subcommand.
+- Draw Things cloud generation is enabled with `--cloud-compute`, not with a separate subcommand.
+- `--models-dir` is an optional flag, never a positional argument.
+- Auth commands are standalone and never require a models directory.
+- Saved cloud credentials are reused by `auth state`, `auth token`, `lora upload`, and `generate --cloud-compute`.
+- Saved cloud credentials remember the cloud API base URL used at login time.
+
+### Canonical Generation
+
+Local generation:
 
 ```bash
-swift run media-generation-kit-cli --help
-```
-
-The CLI uses the async catalog APIs, so model resolution, `models list`, and `models inspect` can populate from bundled or remote catalog data when needed.
-
-Common commands:
-
-```bash
-swift run media-generation-kit-cli generate \
-  --model hf://black-forest-labs/FLUX.2-klein-4B \
+swift run -c release media-generation-kit-cli generate \
+  --models-dir /tmp \
+  --prompt "a cat" \
+  --model "flux_2_klein_4b_q8p.ckpt" \
   --width 1024 \
   --height 1024 \
   --num-inference-steps 4 \
-  --prompt "a red cube on a table" \
-  --output /tmp/output.png
-
-swift run media-generation-kit-cli models ensure \
-  --model hf://black-forest-labs/FLUX.2-klein-4B
-
-swift run media-generation-kit-cli lora convert \
-  --input ./style.safetensors \
-  --output ./style_lora_f16.ckpt
-
-swift run media-generation-kit-cli auth login
+  --output /tmp/cat.png
 ```
 
-For remote generation:
+Image-to-image:
 
 ```bash
-swift run media-generation-kit-cli generate \
+swift run -c release media-generation-kit-cli generate \
+  --models-dir /tmp \
+  --prompt "a studio portrait" \
+  --model "flux_2_klein_4b_q8p.ckpt" \
+  --width 1024 \
+  --height 1024 \
+  --num-inference-steps 4 \
+  --image /tmp/input.png \
+  --strength 0.35 \
+  --output /tmp/portrait.png
+```
+
+Remote generation:
+
+```bash
+swift run -c release media-generation-kit-cli generate \
   --remote \
   --remote-url 127.0.0.1 \
+  --remote-port 7859 \
   --remote-tls \
-  --model hf://black-forest-labs/FLUX.2-klein-4B \
+  --prompt "a cat" \
+  --model "flux_2_klein_4b_q8p.ckpt" \
   --width 1024 \
   --height 1024 \
-  --num-inference-steps 4 \
-  --prompt "a red cube on a table"
+  --num-inference-steps 4
 ```
 
-For Draw Things cloud compute:
+Draw Things cloud compute:
 
 ```bash
-swift run media-generation-kit-cli generate \
+swift run -c release media-generation-kit-cli generate \
   --cloud-compute \
-  --api-key YOUR_API_KEY \
-  --model flux_2_klein_4b_q8p.ckpt \
+  --api-key "API_KEY" \
+  --prompt "a cat" \
+  --model "flux_2_klein_4b_q8p.ckpt" \
   --width 1024 \
   --height 1024 \
   --num-inference-steps 4 \
-  --prompt "a red cube on a table" \
-  --output /tmp/cloud-output.png
+  --output /tmp/cat.png
 ```
 
-## Source of Truth
+Saved-login cloud compute:
 
-- Public package URL: `https://github.com/drawthingsai/media-generation-kit.git`
-- Main implementation: `https://github.com/drawthingsai/draw-things-community.git`
+```bash
+swift run -c release media-generation-kit-cli auth login
 
-If you want to contribute code, the main implementation repository is the authoritative source.
+swift run -c release media-generation-kit-cli generate \
+  --cloud-compute \
+  --prompt "a cat" \
+  --model "flux_2_klein_4b_q8p.ckpt" \
+  --width 1024 \
+  --height 1024 \
+  --num-inference-steps 4 \
+  --output /tmp/cat.png
+```
 
-## License
+### Auth Commands
 
-This repository is licensed under LGPLv3. See [LICENSE](LICENSE).
+Google browser sign-in:
+
+```bash
+swift run -c release media-generation-kit-cli auth login
+```
+
+Google browser sign-in against a non-default API host:
+
+```bash
+swift run -c release media-generation-kit-cli auth login \
+  --cloud-api-base-url "https://staging-api.drawthings.ai"
+```
+
+Auth state validation:
+
+```bash
+swift run -c release media-generation-kit-cli auth state \
+  --api-key "API_KEY" \
+  --cloud-api-base-url "https://api.drawthings.ai"
+```
+
+Auth token fetch:
+
+```bash
+swift run -c release media-generation-kit-cli auth token \
+  --api-key "API_KEY"
+```
+
+Logout saved credentials:
+
+```bash
+swift run -c release media-generation-kit-cli auth logout
+```
+
+Notes:
+
+- `auth state` and `auth token` may omit `--api-key` after `auth login`.
+- If `auth login` used a custom `--cloud-api-base-url`, later saved-credential flows reuse that same API host unless explicitly overridden.
+
+### Model Commands
+
+Catalog list:
+
+```bash
+swift run -c release media-generation-kit-cli models list \
+  --models-dir /tmp
+```
+
+Ensure model files exist locally:
+
+```bash
+swift run -c release media-generation-kit-cli models ensure \
+  --models-dir /tmp \
+  --model "flux_2_klein_4b_q8p.ckpt"
+```
+
+Inspect resolved model metadata:
+
+```bash
+swift run -c release media-generation-kit-cli models inspect \
+  --models-dir /tmp \
+  --model "hf://black-forest-labs/FLUX.2-klein-4B"
+```
+
+Catalog behavior:
+
+- The CLI uses the async `MediaGenerationEnvironment` catalog APIs.
+- `generate`, `models list`, and `models inspect` may populate metadata from bundled or remote catalog data when needed.
+
+Known gap:
+
+- `models list-remote` is still exposed, but it intentionally fails because the current public `MediaGenerationKit` API does not provide remote model listing yet.
+
+### LoRA Commands
+
+Convert LoRA:
+
+```bash
+swift run -c release media-generation-kit-cli lora convert \
+  --input /path/to/my_lora.safetensors \
+  --output /tmp/my_lora_lora_f16.ckpt
+```
+
+Convert LoRA with derived output name in a chosen directory:
+
+```bash
+swift run -c release media-generation-kit-cli lora convert \
+  --input /path/to/my_lora.safetensors \
+  --output-dir /tmp \
+  --scale 0.8
+```
+
+Upload converted LoRA:
+
+```bash
+swift run -c release media-generation-kit-cli lora upload \
+  --input /path/to/my_lora_lora_f16.ckpt \
+  --api-key "API_KEY"
+```
+
+Saved-login upload variant:
+
+```bash
+swift run -c release media-generation-kit-cli auth login
+
+swift run -c release media-generation-kit-cli lora upload \
+  --input /path/to/my_lora_lora_f16.ckpt
+```
+
+### Storage Commands
+
+Known gap:
+
+- `storage info` is still exposed, but it intentionally fails because the current public `MediaGenerationKit` API does not provide storage inspection yet.
+
+## Guardrails
+
+- Prefer running the built binary instead of `swift run` when you need perfectly clean stdout.
+- Do not reintroduce positional models-directory arguments.
+- Do not add separate `generate remote` or `generate cloud-compute` subcommands.
+- Do not document removed SDK types such as `GenerationPipeline`, `GenerationBackend`, `GenerationRequest`, `GenerationOptions`, or `CloudSession`.
+- Do not reintroduce the removed legacy façade or the old internal runtime naming scheme into the public `MediaGenerationKit` API.
