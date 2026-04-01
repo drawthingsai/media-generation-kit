@@ -19,6 +19,29 @@ If command or API behavior changes, update this file and the wrapper-repo copy t
 
 ## Swift Package
 
+### Installation
+
+In `Package.swift`:
+
+```swift
+import PackageDescription
+
+let package = Package(
+  name: "MyApp",
+  dependencies: [
+    .package(url: "https://github.com/drawthingsai/media-generation-kit.git", from: "0.1.0")
+  ],
+  targets: [
+    .executableTarget(
+      name: "MyApp",
+      dependencies: [
+        .product(name: "MediaGenerationKit", package: "media-generation-kit")
+      ]
+    )
+  ]
+)
+```
+
 ### Public Surface
 
 The package is centered on:
