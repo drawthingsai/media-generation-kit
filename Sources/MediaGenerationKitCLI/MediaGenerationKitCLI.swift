@@ -15,7 +15,7 @@ private struct StoredCloudCredentials: Codable {
 
 private enum MediaGenerationKitCLICredentialsStore {
   private static var credentialsURL: URL {
-    let home = FileManager.default.homeDirectoryForCurrentUser
+    let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
     #if os(macOS)
       let directory = home
         .appendingPathComponent("Library", isDirectory: true)
@@ -418,6 +418,7 @@ private enum GoogleOAuthDesktopFlow {
     #endif
   }
 
+  #if os(macOS) || os(Linux)
   private static func runBrowserLauncher(_ tool: String, argument: String) throws {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: tool)
@@ -441,6 +442,7 @@ private enum GoogleOAuthDesktopFlow {
       throw GoogleOAuthFlowError.browserLaunchFailed(detail)
     }
   }
+  #endif
 
 }
 
