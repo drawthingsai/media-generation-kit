@@ -5,6 +5,10 @@ This file is the combined quick-start and contract guide for:
 - the `MediaGenerationKit` Swift package
 - the `media-generation-kit-cli` example client
 
+Full documentation:
+
+- https://drawthingsai.github.io/media-generation-kit
+
 Keep examples, help text, and behavior aligned with:
 
 - `Libraries/MediaGenerationKit`
@@ -20,6 +24,7 @@ If command or API behavior changes, update this file and the wrapper-repo copy t
 The package is centered on:
 
 - `MediaGenerationPipeline`
+- `MediaGenerationPipeline.Preview`
 - `MediaGenerationEnvironment`
 - `LoRAImporter`
 - `LoRAStore`
@@ -158,6 +163,12 @@ Results are `MediaGenerationPipeline.Result` values and support:
 - `write(to:type:)`
 - `CIImage(result)`
 - `UIImage(result)`
+
+Generation progress callbacks can also carry a `MediaGenerationPipeline.Preview?`:
+
+- `preview == nil` for non-preview states such as `.preparing`, `.uploading`, or `.completed`
+- `preview != nil` for preview-bearing progress updates such as sampling
+- `Preview` is a random-access collection whose subscript lazily decodes a `CGImage` on demand
 
 ### Environment Helpers
 
@@ -403,3 +414,15 @@ Known gap:
 - Do not add separate `generate remote` or `generate cloud-compute` subcommands.
 - Do not document removed SDK types such as `GenerationPipeline`, `GenerationBackend`, `GenerationRequest`, `GenerationOptions`, or `CloudSession`.
 - Do not reintroduce the removed legacy façade or the old internal runtime naming scheme into the public `MediaGenerationKit` API.
+
+## License
+
+`MediaGenerationKit` is distributed under LGPLv3.
+
+For the public Swift package, the code and dependencies that cross over from
+`draw-things-community` into the `media-generation-kit` distribution are relicensed under LGPLv3
+as part of that package.
+
+The intent of using LGPLv3 here is to encourage improvements to `MediaGenerationKit` and closely
+related package code to be contributed back to `MediaGenerationKit`, not to force GPLv3-style
+licensing onto downstream applications that use the package.
