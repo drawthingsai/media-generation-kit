@@ -29,7 +29,7 @@ import PackageDescription
 let package = Package(
   name: "MyApp",
   dependencies: [
-    .package(url: "https://github.com/drawthingsai/media-generation-kit.git", from: "0.1.0")
+    .package(url: "https://github.com/drawthingsai/media-generation-kit.git", from: "1.20260401.0")
   ],
   targets: [
     .executableTarget(
