@@ -29,7 +29,7 @@ import PackageDescription
 let package = Package(
   name: "MyApp",
   dependencies: [
-    .package(url: "https://github.com/drawthingsai/media-generation-kit.git", from: "1.20260401.0")
+    .package(url: "https://github.com/drawthingsai/media-generation-kit.git", branch: "main")
   ],
   targets: [
     .executableTarget(
@@ -41,6 +41,9 @@ let package = Package(
   ]
 )
 ```
+
+`media-generation-kit` currently pins `draw-things-community` by revision, so install this package with
+`branch: "main"` or a specific revision instead of a version-based requirement.
 
 ### Public Surface
 
