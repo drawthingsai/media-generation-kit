@@ -1,451 +1,66 @@
 #if os(macOS) || os(Linux)
 import ArgumentParser
+import CLICloudAuth
 import Foundation
 import MediaGenerationKit
 import UniformTypeIdentifiers
-#if canImport(Network)
-import Network
-#endif
-
-private struct StoredCloudCredentials: Codable {
-  let provider: String
-  let apiKey: String
-  let apiBaseURL: String?
-  let savedAt: Date
-}
 
 private enum MediaGenerationKitCLICredentialsStore {
-  private static var credentialsURL: URL {
-    let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-    #if os(macOS)
-      let directory = home
-        .appendingPathComponent("Library", isDirectory: true)
-        .appendingPathComponent("Application Support", isDirectory: true)
-        .appendingPathComponent("MediaGenerationKitCLI", isDirectory: true)
-    #else
-      let directory = home
-        .appendingPathComponent(".config", isDirectory: true)
-        .appendingPathComponent("MediaGenerationKitCLI", isDirectory: true)
-    #endif
-    return directory.appendingPathComponent("cloud-credentials.json", isDirectory: false)
+  private static let store = CLICloudCredentialsStore(
+    applicationName: "MediaGenerationKitCLI")
+
+  static func load() -> CLICloudCredentials? {
+    store.load()
   }
 
-  static func load() -> StoredCloudCredentials? {
-    let url = credentialsURL
-    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-    guard let data = try? Data(contentsOf: url) else { return nil }
-    return try? JSONDecoder().decode(StoredCloudCredentials.self, from: data)
-  }
-
-  static func save(_ credentials: StoredCloudCredentials) throws {
-    let url = credentialsURL
-    try FileManager.default.createDirectory(
-      at: url.deletingLastPathComponent(),
-      withIntermediateDirectories: true
-    )
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    let data = try encoder.encode(credentials)
-    try data.write(to: url, options: .atomic)
-    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+  static func save(_ credentials: CLICloudCredentials) throws {
+    try store.save(credentials)
   }
 
   static func remove() throws {
-    let url = credentialsURL
-    guard FileManager.default.fileExists(atPath: url.path) else { return }
-    try FileManager.default.removeItem(at: url)
+    try store.remove()
   }
 
   static func description() -> String {
-    credentialsURL.path
+    store.credentialsPath
   }
 }
 
 private struct AuthCommandOutput: Encodable {
-  let ok: Bool
+  enum Action: String, Encodable {
+    case login
+    case logout
+  }
+
+  let action: Action
   let provider: String?
   let credentialsPath: String
   let cloudAPIBaseURL: String?
-}
 
-private let defaultCloudAPIBaseURL = URL(string: "https://api.drawthings.ai")!
+  static func login(
+    credentials: CLICloudCredentials,
+    credentialsPath: String,
+    apiBaseURL: URL
+  ) -> AuthCommandOutput {
+    AuthCommandOutput(
+      action: .login,
+      provider: credentials.provider,
+      credentialsPath: credentialsPath,
+      cloudAPIBaseURL: apiBaseURL.absoluteString
+    )
+  }
 
-private enum GoogleOAuthFlowError: LocalizedError {
-  case unsupportedPlatform
-  case listenerFailed(String)
-  case listenerTimedOut
-  case callbackFailed(String)
-  case startFailed(String)
-  case browserLaunchFailed(String)
-
-  var errorDescription: String? {
-    switch self {
-    case .unsupportedPlatform:
-      return "Google browser login is not supported on this platform."
-    case .listenerFailed(let message):
-      return "Failed to start local OAuth callback listener: \(message)"
-    case .listenerTimedOut:
-      return "Timed out waiting for Google OAuth callback."
-    case .callbackFailed(let message):
-      return "Google OAuth callback failed: \(message)"
-    case .startFailed(let message):
-      return "Failed to start Google login: \(message)"
-    case .browserLaunchFailed(let message):
-      return "Failed to launch browser: \(message)"
-    }
+  static func logout(credentialsPath: String) -> AuthCommandOutput {
+    AuthCommandOutput(
+      action: .logout,
+      provider: nil,
+      credentialsPath: credentialsPath,
+      cloudAPIBaseURL: nil
+    )
   }
 }
 
-private enum GoogleOAuthDesktopFlow {
-  private static let callbackPath = "/oauth2callback"
-
-  private struct AuthorizationCallback {
-    let apiKey: String?
-    let provider: String?
-    let error: String?
-    let errorDescription: String?
-  }
-
-  #if canImport(Network)
-    private final class LoopbackServer {
-      private static let maxRequestSize = 64 * 1024
-      private let queue = DispatchQueue(label: "ai.drawthings.mediagenerationkitcli.google-oauth")
-      private let readySemaphore = DispatchSemaphore(value: 0)
-      private let callbackSemaphore = DispatchSemaphore(value: 0)
-      private var portValue: UInt16?
-      private var callbackResult: Result<AuthorizationCallback, Error>?
-      private let listener: NWListener
-
-      init() throws {
-        do {
-          let parameters = NWParameters.tcp
-          parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
-          listener = try NWListener(using: parameters)
-        } catch {
-          throw GoogleOAuthFlowError.listenerFailed(error.localizedDescription)
-        }
-
-        listener.stateUpdateHandler = { [weak self] state in
-          guard let self else { return }
-          switch state {
-          case .ready:
-            self.portValue = self.listener.port?.rawValue
-            self.readySemaphore.signal()
-          case .failed(let error):
-            self.callbackResult = .failure(error)
-            self.readySemaphore.signal()
-            self.callbackSemaphore.signal()
-          default:
-            break
-          }
-        }
-
-        listener.newConnectionHandler = { [weak self] connection in
-          self?.handle(connection: connection)
-        }
-
-        listener.start(queue: queue)
-      }
-
-      var redirectURL: URL {
-        get throws {
-          let waitResult = readySemaphore.wait(timeout: .now() + 10)
-          guard waitResult == .success, let portValue else {
-            throw GoogleOAuthFlowError.listenerFailed("Listener did not become ready.")
-          }
-          return URL(string: "http://127.0.0.1:\(portValue)\(callbackPath)")!
-        }
-      }
-
-      func waitForCallback(timeout: TimeInterval = 180) throws -> AuthorizationCallback {
-        let waitResult = callbackSemaphore.wait(timeout: .now() + timeout)
-        guard waitResult == .success else {
-          listener.cancel()
-          throw GoogleOAuthFlowError.listenerTimedOut
-        }
-
-        switch callbackResult {
-        case .success(let callback):
-          return callback
-        case .failure(let error):
-          throw GoogleOAuthFlowError.callbackFailed(error.localizedDescription)
-        case .none:
-          throw GoogleOAuthFlowError.callbackFailed("No callback received.")
-        }
-      }
-
-      private func handle(connection: NWConnection) {
-        connection.start(queue: queue)
-        receiveRequest(on: connection, accumulatedData: Data())
-      }
-
-      private func receiveRequest(on connection: NWConnection, accumulatedData: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) {
-          [weak self] data, _, isComplete, error in
-          guard let self else { return }
-
-          if let error {
-            self.finish(connection: connection, result: .failure(error))
-            return
-          }
-
-          var accumulatedData = accumulatedData
-          if let data {
-            accumulatedData.append(data)
-          }
-
-          do {
-            if try self.processRequestIfReady(accumulatedData, on: connection) {
-              return
-            }
-          } catch {
-            self.finish(connection: connection, result: .failure(error))
-            return
-          }
-
-          if isComplete {
-            self.finish(
-              connection: connection,
-              result: .failure(GoogleOAuthFlowError.callbackFailed("Malformed callback request."))
-            )
-            return
-          }
-
-          guard accumulatedData.count < Self.maxRequestSize else {
-            self.finish(
-              connection: connection,
-              result: .failure(GoogleOAuthFlowError.callbackFailed("OAuth callback request exceeded size limit."))
-            )
-            return
-          }
-
-          self.receiveRequest(on: connection, accumulatedData: accumulatedData)
-        }
-      }
-
-      private func processRequestIfReady(_ requestData: Data, on connection: NWConnection) throws
-        -> Bool
-      {
-        guard let headerText = completeHeaderText(from: requestData) else {
-          return false
-        }
-        let firstLine =
-          headerText.components(separatedBy: "\r\n").first
-          ?? headerText.components(separatedBy: "\n").first
-        guard let firstLine else {
-          throw GoogleOAuthFlowError.callbackFailed("Unexpected HTTP request line.")
-        }
-
-        let requestParts = firstLine.split(separator: " ")
-        guard requestParts.count >= 2 else {
-          throw GoogleOAuthFlowError.callbackFailed("Unexpected HTTP request line.")
-        }
-
-        let requestTarget = String(requestParts[1])
-        guard
-          let components = URLComponents(string: "http://127.0.0.1\(requestTarget)"),
-          components.path == callbackPath
-        else {
-          writeHTTPResponse(
-            connection: connection,
-            statusLine: "HTTP/1.1 404 Not Found",
-            body: "<html><body><h1>Not Found</h1></body></html>"
-          ) { _ in
-            self.finish(
-              connection: connection,
-              result: .failure(GoogleOAuthFlowError.callbackFailed("Unexpected callback path."))
-            )
-          }
-          return true
-        }
-
-        let queryItems = Dictionary(
-          uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-        let callback = AuthorizationCallback(
-          apiKey: queryItems["api_key"],
-          provider: queryItems["provider"],
-          error: queryItems["error"],
-          errorDescription: queryItems["error_description"]
-        )
-
-        let body: String
-        if callback.error != nil {
-          body =
-            "<html><body><h1>Google login failed</h1><p>You can close this window and return to MediaGenerationKitCLI.</p></body></html>"
-        } else {
-          body =
-            "<html><body><h1>Google login complete</h1><p>You can close this window and return to MediaGenerationKitCLI.</p></body></html>"
-        }
-        writeHTTPResponse(
-          connection: connection,
-          statusLine: "HTTP/1.1 200 OK",
-          body: body
-        ) { sendError in
-          if let sendError {
-            self.finish(connection: connection, result: .failure(sendError))
-          } else {
-            self.finish(connection: connection, result: .success(callback))
-          }
-        }
-        return true
-      }
-
-      private func completeHeaderText(from requestData: Data) -> String? {
-        let delimiters = [
-          requestData.range(of: Data("\r\n\r\n".utf8)),
-          requestData.range(of: Data("\n\n".utf8)),
-        ]
-        guard let delimiter = delimiters.compactMap({ $0 }).first else {
-          return nil
-        }
-        let headerData = Data(requestData[..<delimiter.lowerBound])
-        return String(data: headerData, encoding: .utf8)
-      }
-
-      private func writeHTTPResponse(
-        connection: NWConnection,
-        statusLine: String,
-        body: String,
-        completion: @escaping (NWError?) -> Void
-      ) {
-        let bodyData = Data(body.utf8)
-        let responseText = """
-          \(statusLine)\r
-          Content-Type: text/html; charset=utf-8\r
-          Content-Length: \(bodyData.count)\r
-          Connection: close\r
-          \r
-          \(body)
-          """
-        connection.send(content: Data(responseText.utf8), completion: .contentProcessed(completion))
-      }
-
-      private func finish(connection: NWConnection, result: Result<AuthorizationCallback, Error>) {
-        callbackResult = result
-        connection.cancel()
-        listener.cancel()
-        callbackSemaphore.signal()
-      }
-    }
-  #endif
-
-  static func signIn(apiBaseURL: URL) throws -> StoredCloudCredentials {
-    #if canImport(Network)
-      let callbackServer = try LoopbackServer()
-      let redirectURL = try callbackServer.redirectURL
-      let authorizationURL = try startGoogleLogin(apiBaseURL: apiBaseURL, redirectURL: redirectURL)
-
-      try openBrowser(authorizationURL)
-      let callback = try callbackServer.waitForCallback()
-      if let error = callback.error {
-        let description = callback.errorDescription ?? error
-        throw GoogleOAuthFlowError.callbackFailed(description)
-      }
-      guard let apiKey = callback.apiKey, !apiKey.isEmpty else {
-        throw GoogleOAuthFlowError.callbackFailed("API key missing from callback.")
-      }
-
-      return StoredCloudCredentials(
-        provider: callback.provider ?? "google",
-        apiKey: apiKey,
-        apiBaseURL: apiBaseURL.absoluteString,
-        savedAt: Date()
-      )
-    #else
-      throw GoogleOAuthFlowError.unsupportedPlatform
-    #endif
-  }
-
-  private static func startGoogleLogin(apiBaseURL: URL, redirectURL: URL) throws -> URL {
-    var request = URLRequest(url: apiBaseURL.appendingPathComponent("/auth/google/login"))
-    request.httpMethod = "POST"
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode([
-      "redirect_uri": redirectURL.absoluteString
-    ])
-
-    let semaphore = DispatchSemaphore(value: 0)
-    var responseData: Data?
-    var response: URLResponse?
-    var responseError: Error?
-
-    let task = URLSession.shared.dataTask(with: request) { data, urlResponse, error in
-      responseData = data
-      response = urlResponse
-      responseError = error
-      semaphore.signal()
-    }
-    task.resume()
-    semaphore.wait()
-
-    if let responseError {
-      throw GoogleOAuthFlowError.startFailed(responseError.localizedDescription)
-    }
-
-    guard let httpResponse = response as? HTTPURLResponse else {
-      throw GoogleOAuthFlowError.startFailed("missing HTTP response.")
-    }
-    guard let responseData else {
-      throw GoogleOAuthFlowError.startFailed("missing response body.")
-    }
-
-    guard (200..<300).contains(httpResponse.statusCode) else {
-      let message = String(data: responseData, encoding: .utf8) ?? "HTTP \(httpResponse.statusCode)"
-      throw GoogleOAuthFlowError.startFailed(message)
-    }
-
-    let payload = try JSONDecoder().decode(GoogleLoginStartResponse.self, from: responseData)
-    guard let authorizationURL = URL(string: payload.authorizationURL) else {
-      throw GoogleOAuthFlowError.startFailed("invalid authorization URL.")
-    }
-    return authorizationURL
-  }
-
-  private struct GoogleLoginStartResponse: Decodable {
-    let authorizationURL: String
-
-    private enum CodingKeys: String, CodingKey {
-      case authorizationURL = "authorization_url"
-    }
-  }
-
-  private static func openBrowser(_ url: URL) throws {
-    #if os(macOS)
-      try runBrowserLauncher("/usr/bin/open", argument: url.absoluteString)
-    #elseif os(Linux)
-      try runBrowserLauncher("/usr/bin/xdg-open", argument: url.absoluteString)
-    #else
-      throw GoogleOAuthFlowError.browserLaunchFailed("Unsupported platform.")
-    #endif
-  }
-
-  #if os(macOS) || os(Linux)
-  private static func runBrowserLauncher(_ tool: String, argument: String) throws {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: tool)
-    process.arguments = [argument]
-    let errorPipe = Pipe()
-    process.standardError = errorPipe
-    do {
-      try process.run()
-      process.waitUntilExit()
-    } catch {
-      throw GoogleOAuthFlowError.browserLaunchFailed(error.localizedDescription)
-    }
-    guard process.terminationStatus == 0 else {
-      let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-      let errorMessage = String(data: errorData, encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-      let detail =
-        errorMessage?.isEmpty == false
-        ? errorMessage!
-        : "exit status \(process.terminationStatus)"
-      throw GoogleOAuthFlowError.browserLaunchFailed(detail)
-    }
-  }
-  #endif
-
-}
+private let defaultCloudAPIBaseURL = CLICloudDefaultAPIBaseURL
 
 struct MediaGenerationKitCLIRunner {
   fileprivate static let defaultPromptValue = "a beautiful landscape with mountains and a lake"
@@ -715,22 +330,15 @@ struct MediaGenerationKitCLIRunner {
     json || jsonlProgress
   }
 
-  private func resolvedCloudAPIBaseURL(using storedCredentials: StoredCloudCredentials?) throws -> URL {
-    if let cloudAPIBaseURL {
-      guard let parsedURL = URL(string: cloudAPIBaseURL) else {
-        throw MediaGenerationKitCLIExecutionError.invalidArgument(
-          "Invalid --cloud-api-base-url: \(cloudAPIBaseURL)")
-      }
-      return parsedURL
+  private func resolvedCloudAPIBaseURL(using storedCredentials: CLICloudCredentials?) throws -> URL {
+    do {
+      return try CLICloudAuthClient.resolvedAPIBaseURL(
+        explicit: cloudAPIBaseURL,
+        storedCredentials: storedCredentials
+      )
+    } catch let error as CLICloudAuthError {
+      throw MediaGenerationKitCLIExecutionError.invalidArgument(error.localizedDescription)
     }
-    if let storedAPIBaseURL = storedCredentials?.apiBaseURL {
-      guard let parsedURL = URL(string: storedAPIBaseURL) else {
-        throw MediaGenerationKitCLIExecutionError.invalidArgument(
-          "Saved credentials contain an invalid cloud API base URL: \(storedAPIBaseURL)")
-      }
-      return parsedURL
-    }
-    return defaultCloudAPIBaseURL
   }
 
   private func textLog(_ text: String, terminator: String = "\n") {
@@ -763,29 +371,6 @@ struct MediaGenerationKitCLIRunner {
     } catch {
       throw MediaGenerationKitCLIExecutionError.outputWriteFailed(
         "Failed to write JSON to '\(path)': \(error.localizedDescription)")
-    }
-  }
-
-  private enum CLIAuthState {
-    case idle
-    case fetchingToken
-    case authenticated(expiresAt: Date?)
-    case failed(Error)
-  }
-
-  private func describeAuthState(_ state: CLIAuthState) -> String {
-    switch state {
-    case .idle:
-      return "idle"
-    case .fetchingToken:
-      return "fetchingToken"
-    case .authenticated(let expiresAt):
-      if let expiresAt {
-        return "authenticated(expiresAt: \(expiresAt))"
-      }
-      return "authenticated(expiresAt: nil)"
-    case .failed(let error):
-      return "failed(\(error))"
     }
   }
 
@@ -907,56 +492,13 @@ struct MediaGenerationKitCLIRunner {
     baseURL: URL,
     emitStates: Bool
   ) throws -> String {
-    if emitStates {
-      textLog("  [AuthState] \(describeAuthState(.idle))")
-      textLog("  [AuthState] \(describeAuthState(.fetchingToken))")
-    }
-
-    struct TokenRequest: Codable {
-      let apiKey: String
-      let appCheckType: String
-      let appCheckToken: String?
-    }
-
-    struct TokenResponse: Codable {
-      let shortTermToken: String
-      let expiresIn: Int
-    }
-
-    let requestBody = try JSONEncoder().encode(
-      TokenRequest(apiKey: apiKey, appCheckType: "none", appCheckToken: nil)
-    )
-    let request: URLRequest = {
-      var request = URLRequest(url: baseURL.appendingPathComponent("/sdk/token"))
-      request.httpMethod = "POST"
-      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-      request.httpBody = requestBody
-      return request
-    }()
-
-    do {
-      let tokenResponse = try runAsync(timeout: 30) {
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-          throw MediaGenerationKitCLIExecutionError.authFailed("Authentication failed: missing HTTP response.")
-        }
-        guard httpResponse.statusCode == 200 else {
-          throw MediaGenerationKitCLIExecutionError.authFailed(
-            "Authentication failed with status code \(httpResponse.statusCode).")
-        }
-        return try JSONDecoder().decode(TokenResponse.self, from: data)
+    try CLICloudAuthClient(baseURL: baseURL).fetchShortTermToken(
+      apiKey: apiKey,
+      emitStates: emitStates,
+      stateHandler: { state in
+        textLog("  [AuthState] \(describeCLICloudAuthState(state))")
       }
-      if emitStates {
-        let expiresAt = Date().addingTimeInterval(TimeInterval(tokenResponse.expiresIn))
-        textLog("  [AuthState] \(describeAuthState(.authenticated(expiresAt: expiresAt)))")
-      }
-      return tokenResponse.shortTermToken
-    } catch {
-      if emitStates {
-        textLog("  [AuthState] \(describeAuthState(.failed(error)))")
-      }
-      throw error
-    }
+    ).value
   }
 
   private func inspectInfo(for resolvedModel: String) async -> CLIModelInspectInfo {
@@ -1277,7 +819,10 @@ struct MediaGenerationKitCLIRunner {
   private func runImpl() async throws {
     let storedCredentials = MediaGenerationKitCLICredentialsStore.load()
     let baseURL = try resolvedCloudAPIBaseURL(using: storedCredentials)
-    let effectiveAPIKey = apiKey ?? storedCredentials?.apiKey
+    let effectiveAPIKey = CLICloudAuthClient.effectiveAPIKey(
+      explicit: apiKey,
+      storedCredentials: storedCredentials
+    )
 
     if testAuthState {
       guard effectiveAPIKey != nil else {
@@ -2329,14 +1874,17 @@ struct MediaGenerationKitCLI: AsyncParsableCommand {
           Swift.print("Credentials will be saved to: \(MediaGenerationKitCLICredentialsStore.description())")
         }
 
-        let credentials = try GoogleOAuthDesktopFlow.signIn(apiBaseURL: baseURL)
+        let credentials = try CLICloudGoogleOAuthDesktopFlow.signIn(
+          apiBaseURL: baseURL,
+          callbackApplicationName: "MediaGenerationKitCLI",
+          listenerQueueLabel: "ai.drawthings.mediagenerationkitcli.google-oauth"
+        )
         try MediaGenerationKitCLICredentialsStore.save(credentials)
 
-        let output = AuthCommandOutput(
-          ok: true,
-          provider: credentials.provider,
+        let output = AuthCommandOutput.login(
+          credentials: credentials,
           credentialsPath: MediaGenerationKitCLICredentialsStore.description(),
-          cloudAPIBaseURL: baseURL.absoluteString
+          apiBaseURL: baseURL
         )
         if json {
           let encoder = JSONEncoder()
@@ -2361,12 +1909,8 @@ struct MediaGenerationKitCLI: AsyncParsableCommand {
 
       func run() async throws {
         try MediaGenerationKitCLICredentialsStore.remove()
-        let output = AuthCommandOutput(
-          ok: true,
-          provider: nil,
-          credentialsPath: MediaGenerationKitCLICredentialsStore.description(),
-          cloudAPIBaseURL: nil
-        )
+        let output = AuthCommandOutput.logout(
+          credentialsPath: MediaGenerationKitCLICredentialsStore.description())
         if json {
           let encoder = JSONEncoder()
           encoder.outputFormatting = [.sortedKeys]
